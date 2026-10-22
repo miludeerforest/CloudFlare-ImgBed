@@ -2,9 +2,8 @@ name: Upstream Sync
 
 permissions:
   contents: write
-  actions: write
   issues: write
-  workflows: write
+
 on:
   schedule:
     - cron: "0 0 * * *" # every day
@@ -32,6 +31,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check breaking update policy
         id: breaking_guard
@@ -42,6 +42,16 @@ jobs:
           ALLOW_BREAKING_UPDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_breaking_update == true }}
         run: bash .github/breaking-updates/scripts/breaking-update-guard.sh check
 
+      - name: Check sync token
+        if: steps.breaking_guard.outputs.blocked != 'true'
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Configure the SYNC_TOKEN repository secret with Contents and Workflows write permissions for this repository."
+            exit 1
+          fi
+
       - name: Sync upstream changes
         id: sync
         if: steps.breaking_guard.outputs.blocked != 'true'
@@ -50,8 +60,9 @@ jobs:
           upstream_sync_repo: MarSeventh/CloudFlare-ImgBed
           upstream_sync_branch: main
           target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_sync_token: ${{ secrets.SYNC_TOKEN }}
+          # The token must allow writing repository contents and workflow files.
+          # Pushes to main trigger deploy-worker.yml; no extra dispatch is needed.
+          target_repo_token: ${{ secrets.SYNC_TOKEN }}
           test_mode: false
 
       - name: Complete breaking update notices
@@ -60,26 +71,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/breaking-updates/scripts/breaking-update-guard.sh complete
 
-      - name: Trigger Worker deploy
-        if: steps.sync.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run deploy-worker.yml --repo "${{ github.repository }}" --ref main
-
       - name: Sync failure guidance
         if: failure() && steps.sync.outcome == 'failure'
         run: |
           {
             echo "## ⚠️ 上游同步未完成 / Upstream synchronization did not complete"
             echo
-            echo "上游同步步骤未能完成。若上游近期修改了 workflow 文件，GitHub 可能会暂停包含 workflow 变更的自动同步；也可能是当前 Fork 的 Actions 权限或同步权限发生了变化。"
+            echo "请检查 SYNC_TOKEN 是否有效、未过期，并已获授权向当前仓库写入代码和 workflow 文件。"
             echo
-            echo "The upstream synchronization step could not be completed. If the upstream workflow files changed recently, GitHub may pause automatic synchronization that includes workflow changes. The issue may also be related to Actions or synchronization permissions in this fork."
+            echo "Verify that SYNC_TOKEN is valid, unexpired, and authorized to write contents and workflow files in this repository."
             echo
-            echo "建议先在 GitHub 页面手动执行一次 **Sync fork**，确认 Actions 具有读写权限后，再重新运行本工作流。"
+            echo "Fine-grained PAT 需要当前仓库的 Contents 和 Workflows 读写权限；Classic PAT 需要适当的仓库 scope 和 workflow scope。仅修改 Actions 的 permissions 无法授予 workflow 写入权限。"
             echo
-            echo "Please manually use **Sync fork** on GitHub, confirm that Actions has read and write permissions, and then rerun this workflow."
+            echo "Fine-grained PATs require Contents and Workflows read/write permissions for this repository; classic PATs require appropriate repository and workflow scopes. Actions permissions alone cannot grant workflow write access."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "[Error] 上游同步未能完成。若上游近期修改了 workflow 文件，请先在 GitHub 页面手动执行一次 Sync Fork，然后重新运行本工作流。"
-          echo "[Error] The upstream sync could not be completed. If the upstream workflow files changed recently, manually run Sync Fork on GitHub and then rerun this workflow."
+          echo "::error::上游同步失败。请检查 SYNC_TOKEN 的仓库授权、有效期及 Contents/Workflows 写入权限，并查看上方同步日志。"
+          echo "::error::Upstream sync failed. Check SYNC_TOKEN repository access, expiration, and Contents/Workflows write permissions, and review the sync logs above."
           exit 1
